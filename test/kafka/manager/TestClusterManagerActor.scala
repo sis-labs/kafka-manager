@@ -46,12 +46,13 @@ class TestClusterManagerActor extends CuratorAwareTest with BaseTest {
 
   override protected def beforeAll(): Unit = {
     super.beforeAll()
-    val clusterConfig = ClusterConfig("dev","0.8.2.0",kafkaServerZkPath, jmxEnabled = false, pollConsumers = true, filterConsumers = true, logkafkaEnabled = true, jmxUser = None, jmxPass = None, tuning = Option(defaultTuning))
+    val clusterConfig = ClusterConfig("dev","0.8.2.0",kafkaServerZkPath, jmxEnabled = false, pollConsumers = true, filterConsumers = true, logkafkaEnabled = true, jmxUser = None, jmxPass = None, jmxSsl = false, tuning = Option(defaultTuning))
     val curatorConfig = CuratorConfig(testServer.getConnectString)
     val config = ClusterManagerActorConfig(
       "pinned-dispatcher"
       ,"/kafka-manager/clusters/dev"
       ,curatorConfig,clusterConfig
+      ,None
     )
     val props = Props(classOf[ClusterManagerActor],config)
 
@@ -246,7 +247,7 @@ class TestClusterManagerActor extends CuratorAwareTest with BaseTest {
   test("run reassign partition for topic") {
     withClusterManagerActor(KSGetTopics) { result : TopicList =>
       val topicSet = result.list.toSet
-      withClusterManagerActor(CMRunReassignPartition(topicSet)) { cmResultsFuture: Future[CMCommandResults] =>
+      withClusterManagerActor(CMRunReassignPartition(topicSet, Set.empty)) { cmResultsFuture: Future[CMCommandResults] =>
         val cmResult = Await.result(cmResultsFuture,10 seconds)
         Thread.sleep(1000)
         cmResult.result.foreach { t =>

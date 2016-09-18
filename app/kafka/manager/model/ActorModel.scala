@@ -11,6 +11,7 @@ import grizzled.slf4j.Logging
 import kafka.common.TopicAndPartition
 import kafka.manager.jmx._
 import kafka.manager.utils
+import kafka.manager.utils.zero81.ForceReassignmentCommand
 import org.joda.time.DateTime
 
 import scala.collection.immutable.Queue
@@ -84,7 +85,7 @@ object ActorModel {
   case class CMUpdateTopicConfig(topic: String, config: Properties, readVersion: Int) extends CommandRequest
   case class CMDeleteTopic(topic: String) extends CommandRequest
   case class CMRunPreferredLeaderElection(topics: Set[String]) extends CommandRequest
-  case class CMRunReassignPartition(topics: Set[String]) extends CommandRequest
+  case class CMRunReassignPartition(topics: Set[String], forceSet: Set[ForceReassignmentCommand]) extends CommandRequest
   case class CMGeneratePartitionAssignments(topics: Set[String], brokers: Set[Int]) extends CommandRequest
   case class CMManualPartitionAssignments(assignments: List[(String, List[(Int, List[Int])])]) extends CommandRequest
 
@@ -124,8 +125,9 @@ object ActorModel {
   case class KCUpdateTopicConfig(topic: String, config: Properties, readVersion: Int) extends CommandRequest
   case class KCDeleteTopic(topic: String) extends CommandRequest
   case class KCPreferredReplicaLeaderElection(topicAndPartition: Set[TopicAndPartition]) extends CommandRequest
-  case class KCReassignPartition(currentTopicIdentity: Map[String, TopicIdentity],
-                               generatedTopicIdentity: Map[String, TopicIdentity]) extends CommandRequest
+  case class KCReassignPartition(currentTopicIdentity: Map[String, TopicIdentity]
+                                 , generatedTopicIdentity: Map[String, TopicIdentity]
+                                 , forceSet: Set[ForceReassignmentCommand]) extends CommandRequest
 
   case class KCCommandResult(result: Try[Unit]) extends CommandResponse
 
@@ -224,21 +226,52 @@ object ActorModel {
   case object DCUpdateState extends CommandRequest
 
   case class GeneratedPartitionAssignments(topic: String, assignments: Map[Int, Seq[Int]], nonExistentBrokers: Set[Int])
-  case class BrokerIdentity(id: Int, host: String, port: Int, jmxPort: Int)
+  case class BrokerIdentity(id: Int, host: String, port: Int, jmxPort: Int, secure: Boolean)
 
   object BrokerIdentity {
     import org.json4s.jackson.JsonMethods._
     import org.json4s.scalaz.JsonScalaz
     import org.json4s.scalaz.JsonScalaz._
 
-import scala.language.reflectiveCalls
+    import scala.language.reflectiveCalls
+    import scalaz.Validation.FlatMap._
+    import scalaz.syntax.validation._
     import scalaz.syntax.applicative._
 
-    implicit def from(id: Int, config: String): Validation[NonEmptyList[JsonScalaz.Error],BrokerIdentity]= {
+    val DEFAULT_SECURE : JsonScalaz.Result[Boolean] = false.successNel
+
+    implicit def from(brokerId: Int, config: String): Validation[NonEmptyList[JsonScalaz.Error],BrokerIdentity]= {
       val json = parse(config)
-      (field[String]("host")(json) |@| field[Int]("port")(json) |@| field[Int]("jmx_port")(json))
-      {
-        (host: String, port: Int, jmxPort: Int) => BrokerIdentity(id,host, port, jmxPort)
+      val hostResult = fieldExtended[String]("host")(json)
+      val portResult = fieldExtended[Int]("port")(json)
+      val jmxPortResult = fieldExtended[Int]("jmx_port")(json)
+      val hostPortResult: JsonScalaz.Result[(String, Int, Boolean)] = json.findField(_._1 == "endpoints").map(_ => fieldExtended[List[String]]("endpoints")(json))
+        .fold((hostResult |@| portResult |@| DEFAULT_SECURE)((a, b, c) => (a, b, c))){
+        r =>
+          r.flatMap {
+            endpointList =>
+              val parsedList = endpointList.map {
+                endpoint =>
+                  Validation.fromTryCatchNonFatal {
+                    val arr = endpoint.split("://")(1).split(":")
+                    (arr(0), arr(1).toInt, endpoint.toLowerCase.contains("sasl"))
+                  }.leftMap[JsonScalaz.Error](t => UncategorizedError("endpoints", t.getMessage, List.empty)).toValidationNel
+              }
+              parsedList.find(_.isSuccess).fold({
+                val err: JsonScalaz.Result[(String, Int, Boolean)] = Validation.failureNel(UncategorizedError("endpoints", s"failed to parse host and port from json : $config", List.empty))
+                err
+              }
+              )(r => r)
+          }
+      }
+      for {
+        tpl <- hostPortResult
+        host = tpl._1
+        port = tpl._2
+        secure = tpl._3
+        jmxPort <- jmxPortResult
+      } yield {
+        BrokerIdentity(brokerId, host, port, jmxPort, secure)
       }
     }
   }
@@ -296,7 +329,7 @@ import scala.language.reflectiveCalls
   }
 
   case class BrokerTopicPartitions(id: Int, partitions: IndexedSeq[Int], isSkewed: Boolean)
-  
+
   case class PartitionOffsetsCapture(updateTimeMillis: Long, offsetsMap: Map[Int, Long])
 
   object PartitionOffsetsCapture {
@@ -376,9 +409,37 @@ import scala.language.reflectiveCalls
 
     import org.json4s.jackson.JsonMethods._
     import org.json4s.scalaz.JsonScalaz._
+    import org.json4s._
+    import org.json4s.jackson.Serialization
 
 import scala.language.reflectiveCalls
-    
+
+    implicit val formats = Serialization.formats(FullTypeHints(List(classOf[TopicIdentity])))
+    // Adding a write method to transform/sort the partitionsIdentity to be more readable in JSON and include Topic Identity vals
+    implicit def topicIdentityJSONW: JSONW[TopicIdentity] = new JSONW[TopicIdentity] {
+      def write(ti: TopicIdentity) =
+        makeObj(("topic" -> toJSON(ti.topic))
+          :: ("readVersion" -> toJSON(ti.readVersion))
+          :: ("partitions" -> toJSON(ti.partitions))
+          :: ("partitionsIdentity" -> Extraction.decompose(ti.partitionsIdentity.values.toList.sortBy(_.partNum)))
+          :: ("numBrokers" -> toJSON(ti.numBrokers))
+          :: ("configReadVersion" -> toJSON(ti.configReadVersion))
+          :: ("config" -> toJSON(ti.config))
+          :: ("clusterContext" -> Extraction.decompose(ti.clusterContext))
+          :: ("metrics" -> Extraction.decompose(ti.metrics))
+          :: ("size" -> toJSON(ti.size))
+          :: ("replicationFactor" -> toJSON(ti.replicationFactor))
+          :: ("partitionsByBroker" -> Extraction.decompose(ti.partitionsByBroker))
+          :: ("summedTopicOffsets" -> toJSON(ti.summedTopicOffsets))
+          :: ("preferredReplicasPercentage" -> toJSON(ti.preferredReplicasPercentage))
+          :: ("underReplicatedPercentage" -> toJSON(ti.underReplicatedPercentage))
+          :: ("topicBrokers" -> toJSON(ti.topicBrokers))
+          :: ("brokersSkewPercentage" -> toJSON(ti.brokersSkewPercentage))
+          :: ("brokersSpreadPercentage" -> toJSON(ti.brokersSpreadPercentage))
+          :: ("producerRate" -> toJSON(ti.producerRate))
+          :: Nil)
+    }
+
     private[this] def getPartitionReplicaMap(td: TopicDescription) : Map[String, List[Int]] = {
       // Get the topic description information
       val descJson = parse(td.description._2)
@@ -518,7 +579,7 @@ import scala.language.reflectiveCalls
     // Percentage of the partitions that have an owner
     def percentageCovered : Int =
     if (numPartitions != 0) {
-      val numCovered = partitionOwners.size
+      val numCovered = partitionOwners.count(_._2.nonEmpty)
       100 * numCovered / numPartitions
     } else {
       100 // if there are no partitions to cover, they are all covered!

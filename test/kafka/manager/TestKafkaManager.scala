@@ -32,6 +32,7 @@ class TestKafkaManager extends CuratorAwareTest with BaseTest {
   akkaConfig.setProperty(KafkaManager.BrokerViewUpdateSeconds,"1")
   akkaConfig.setProperty(KafkaManager.KafkaManagerUpdateSeconds,"1")
   akkaConfig.setProperty(KafkaManager.DeleteClusterUpdateSeconds,"1")
+  akkaConfig.setProperty(KafkaManager.ConsumerPropertiesFile,"conf/consumer.properties")
   private[this] val config : Config = ConfigFactory.parseProperties(akkaConfig)
 
   private[this] val kafkaManager : KafkaManager = new KafkaManager(config)
@@ -103,7 +104,9 @@ class TestKafkaManager extends CuratorAwareTest with BaseTest {
     Try(hlConsumer.foreach(_.close()))
     Try(newConsumerThread.foreach(_.interrupt()))
     Try(newConsumer.foreach(_.close()))
-    kafkaManager.shutdown()
+    if(kafkaManager!=null) {
+      kafkaManager.shutdown()
+    }
     Try(broker.shutdown())
     super.afterAll()
   }
@@ -115,7 +118,7 @@ class TestKafkaManager extends CuratorAwareTest with BaseTest {
   }
 
   test("add cluster") {
-    val future = kafkaManager.addCluster("dev","0.8.2.0",kafkaServerZkPath, jmxEnabled = false, pollConsumers = true, filterConsumers = true, jmxUser = None, jmxPass = None, tuning = Option(kafkaManager.defaultTuning))
+    val future = kafkaManager.addCluster("dev","0.8.2.0",kafkaServerZkPath, jmxEnabled = false, pollConsumers = true, filterConsumers = true, jmxUser = None, jmxPass = None, jmxSsl = false, tuning = Option(kafkaManager.defaultTuning))
     val result = Await.result(future,duration)
     assert(result.isRight === true)
     Thread.sleep(2000)
@@ -365,7 +368,7 @@ class TestKafkaManager extends CuratorAwareTest with BaseTest {
   }
 
   test("update cluster zkhost") {
-    val future = kafkaManager.updateCluster("dev","0.8.2.0",testServer.getConnectString, jmxEnabled = false, pollConsumers = true, filterConsumers = true, jmxUser = None, jmxPass = None, tuning = Option(defaultTuning))
+    val future = kafkaManager.updateCluster("dev","0.8.2.0",testServer.getConnectString, jmxEnabled = false, pollConsumers = true, filterConsumers = true, jmxUser = None, jmxSsl = false, jmxPass = None, tuning = Option(defaultTuning))
     val result = Await.result(future,duration)
     assert(result.isRight === true)
 
@@ -400,7 +403,7 @@ class TestKafkaManager extends CuratorAwareTest with BaseTest {
   }
 
   test("update cluster version") {
-    val future = kafkaManager.updateCluster("dev","0.8.1.1",testServer.getConnectString, jmxEnabled = false, pollConsumers = true, filterConsumers = true, jmxUser = None, jmxPass = None, tuning = Option(defaultTuning))
+    val future = kafkaManager.updateCluster("dev","0.8.1.1",testServer.getConnectString, jmxEnabled = false, pollConsumers = true, filterConsumers = true, jmxUser = None, jmxPass = None, jmxSsl = false, tuning = Option(defaultTuning))
     val result = Await.result(future,duration)
     assert(result.isRight === true)
     Thread.sleep(2000)
@@ -422,7 +425,7 @@ class TestKafkaManager extends CuratorAwareTest with BaseTest {
   }
 
   test("update cluster logkafka enabled and activeOffsetCache enabled") {
-    val future = kafkaManager.updateCluster("dev","0.8.2.0",testServer.getConnectString, jmxEnabled = false, pollConsumers = true, filterConsumers = true, logkafkaEnabled = true, activeOffsetCacheEnabled = true, jmxUser = None, jmxPass = None, tuning = Option(defaultTuning))
+    val future = kafkaManager.updateCluster("dev","0.8.2.0",testServer.getConnectString, jmxEnabled = false, pollConsumers = true, filterConsumers = true, logkafkaEnabled = true, activeOffsetCacheEnabled = true, jmxUser = None, jmxPass = None, jmxSsl = false, tuning = Option(defaultTuning))
     val result = Await.result(future,duration)
     assert(result.isRight === true)
     
